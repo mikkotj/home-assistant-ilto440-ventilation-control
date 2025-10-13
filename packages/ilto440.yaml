@@ -1,0 +1,488 @@
+############################################
+#        HOME ASSISTANT PACKAGE: ILTO440   #
+#  Ventilation automation (UI-only mode)   #
+#  Version: 1.0                            #
+#  Date: 2025-10-11                        #
+#  Author: Mikko Jylhä                     #
+#                                          #
+#  - Hardware handles boost & speed steps  #
+#  - 0..5 states (0 = Off)                 #
+#  - The main state machine to imitate     #
+#    IltoControl panel states (with some   #
+#    simplifications)                      #
+#  - The actual entitynames for 3 relays.  #
+#    needed are configured in secrets.yaml #
+#    just for convenience.                 #
+#                                          #
+############################################
+
+############################################
+#               HELPERS / STATE            #
+############################################
+
+input_number:
+  ilmanvaihto_taso:
+    name: Ventilation Level
+    min: 0
+    max: 5
+    step: 1
+    mode: box
+    icon: mdi:fan
+
+  pre_boost_level:
+    name: Pre-Boost Level (UI/reference)
+    min: 0
+    max: 5
+    step: 1
+    mode: box
+    icon: mdi:backup-restore
+
+  delay_seconds:
+    name: Command Delay (s)
+    min: 0
+    max: 10
+    step: 1
+    mode: slider
+    icon: mdi:timer-outline
+    initial: 1
+
+input_boolean:
+  ventilation_system_active:
+    name: Ventilation System Active
+    icon: mdi:power
+
+  boost_active:
+    name: Boost Active
+    icon: mdi:rocket
+
+  boost_extended:
+    name: Boost Extended (2nd press taken)
+    icon: mdi:arrow-expand-horizontal
+
+input_datetime:
+  boost_end_time:
+    name: Boost Ends At
+    has_date: true
+    has_time: true
+
+  boost_last_press:
+    name: Boost Last Press
+    has_date: true
+    has_time: true
+
+timer:
+  boost_timer:
+    name: Boost Timer
+    duration: "00:30:00" # UI timer; hardware handles real timing
+
+############################################
+#                 TEMPLATES                #
+############################################
+
+template:
+  - sensor:
+      - name: "Boost Last Press (Time)"
+        unique_id: boost_last_press_time
+        icon: mdi:clock-outline
+        state: >
+          {% set s = states('input_datetime.boost_last_press') %}
+          {% if s in ['unknown','unavailable',''] %}
+            unknown
+          {% else %}
+            {{ as_datetime(s).strftime('%H:%M') }}
+          {% endif %}
+
+############################################
+#                 SCRIPTS                  #
+############################################
+
+script:
+  ventilation_set_level:
+    alias: "Ventilation: Set Level (bounded 0..5)"
+    mode: parallel
+    fields:
+      level:
+        description: "Target level (will be clamped to 0..5)"
+    sequence:
+      - variables:
+          target: >
+            {% set v = (level | int) %}
+            {% if v < 0 %} 0
+            {% elif v > 5 %} 5
+            {% else %} {{ v }}
+            {% endif %}
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.ilmanvaihto_taso
+        data:
+          value: "{{ target }}"
+      - service: system_log.write
+        data:
+          level: info
+          message: "UI: Level set to {{ target }} (0–5 range, no hardware command sent)"
+
+  ventilation_apply_level:
+    alias: "Ventilation: Apply Level (noop; hardware does it)"
+    mode: restart
+    sequence:
+      - variables:
+          lvl: "{{ states('input_number.ilmanvaihto_taso') | int }}"
+      - service: system_log.write
+        data:
+          level: info
+          message: "UI-only: Level {{ lvl }} confirmed; hardware handled."
+
+  ventilation_bump_level:
+    alias: "Ventilation: Bump Level by Delta"
+    mode: parallel
+    fields:
+      delta:
+        description: "Positive or negative integer"
+        example: 1
+    sequence:
+      - variables:
+          curr: "{{ states('input_number.ilmanvaihto_taso') | int }}"
+          target: "{{ curr + (delta | int) }}"
+      - service: script.ventilation_set_level
+        data:
+          level: "{{ target }}"
+
+  ventilation_boost_activate:
+    alias: "Ventilation: Boost Activate (first press)"
+    mode: single
+    sequence:
+      - variables:
+          curr: "{{ states('input_number.ilmanvaihto_taso') | int }}"
+          pre: "{{ curr }}"
+          boosted: "{{ [curr + 2, 5] | min }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.pre_boost_level
+        data:
+          value: "{{ pre }}"
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.boost_active
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.boost_extended
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.boost_end_time
+        data:
+          datetime: "{{ (now() + timedelta(minutes=30)).strftime('%Y-%m-%d %H:%M:%S') }}"
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.boost_last_press
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+      # Update UI level to reflect boosted speed (hardware handles real boost)
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.ilmanvaihto_taso
+        data:
+          value: "{{ boosted }}"
+      - service: timer.start
+        target:
+          entity_id: timer.boost_timer
+        data:
+          duration: "00:30:00"
+      - service: system_log.write
+        data:
+          level: info
+          message: "Boost started (30m). UI level {{ pre }} -> {{ boosted }}."
+
+  ventilation_boost_extend:
+    alias: "Ventilation: Boost Extend to 60m (second press)"
+    mode: single
+    sequence:
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.boost_extended
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.boost_end_time
+        data:
+          datetime: "{{ (now() + timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S') }}"
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.boost_last_press
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+      - service: timer.start
+        target:
+          entity_id: timer.boost_timer
+        data:
+          duration: "01:00:00"
+      - service: system_log.write
+        data:
+          level: info
+          message: "Boost extended to 60 minutes (UI only)."
+
+  ventilation_boost_cancel:
+    alias: "Ventilation: Boost Cancel (third press)"
+    mode: single
+    sequence:
+      - service: timer.cancel
+        target:
+          entity_id: timer.boost_timer
+      # Reset "Boost Last Press" to a zero-like baseline
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.boost_last_press
+        data:
+          datetime: "1970-01-01 00:00:00"
+      - service: script.ventilation_boost_return
+
+  ventilation_boost_return:
+    alias: "Ventilation: Boost Return to Pre-Boost Level"
+    mode: single
+    sequence:
+      # Reset "Boost Last Press" to baseline so next press is treated as first press
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.boost_last_press
+        data:
+          datetime: "1970-01-01 00:00:00"
+      - variables:
+          pre: "{{ states('input_number.pre_boost_level') | int }}"
+      - service: input_boolean.turn_off
+        target:
+          entity_id:
+            - input_boolean.boost_active
+            - input_boolean.boost_extended
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.ilmanvaihto_taso
+        data:
+          value: "{{ pre }}"
+      - service: system_log.write
+        data:
+          level: info
+          message: "Boost finished/canceled → UI back to level {{ pre }} (last_press reset)."
+
+  ventilation_sync_level_via_relays:
+    alias: "Ventilation: Sync Level via Relays (to target, via 0)"
+    description: >
+      Forces a known baseline by pressing MINUS 6× (to reach 0/Off), then PLUS N×
+      to reach the target level (0..5). Default target is the current UI level.
+    mode: single
+    fields:
+      target_level:
+        description: "Optional explicit target level (0..5). If omitted, uses input_number.ilmanvaihto_taso."
+        example: 3
+    sequence:
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: input_boolean.ventilation_system_active
+                state: "on"
+            sequence:
+              - variables:
+                  # Determine target level (clamped 0..5)
+                  tgt: >
+                    {% set raw = (target_level if target_level is defined else states('input_number.ilmanvaihto_taso')) | int(0) %}
+                    {% if   raw < 0 %} 0
+                    {% elif raw > 5 %} 5
+                    {% else %} {{ raw }}
+                    {% endif %}
+                  # Use your configured inter-press delay
+                  dly: "{{ states('input_number.delay_seconds') | int(1) }}"
+              # 1) Force OFF: press MINUS 6× with delay → ensures hardware at 0
+              - repeat:
+                  count: 6
+                  sequence:
+                    - service: switch.turn_on
+                      target:
+                        entity_id: !secret minus_switch
+                    - delay:
+                        seconds: "{{ dly }}"
+              # (Optional) reflect UI as 0 immediately
+              - service: input_number.set_value
+                target:
+                  entity_id: input_number.ilmanvaihto_taso
+                data:
+                  value: 0
+              # 2) Climb to target: press PLUS tgt× with delay
+              - repeat:
+                  count: "{{ tgt }}"
+                  sequence:
+                    - service: switch.turn_on
+                      target:
+                        entity_id: !secret plus_switch
+                    - delay:
+                        seconds: "{{ dly }}"
+              - service: system_log.write
+                data:
+                  level: info
+                  message: "Sync via relays completed: baseline 0 then +{{ tgt }} → target={{ tgt }}"
+        default:
+          - service: system_log.write
+            data:
+              level: warning
+              message: "Sync via relays skipped: ventilation_system_active is OFF."
+
+############################################
+#                AUTOMATIONS               #
+############################################
+
+automation:
+  ############################################
+  # BUTTON NORMALIZATION (commented)
+  ############################################
+  # - id: normalize_plus_switch
+  #   alias: "Buttons: Normalize PLUS switch"
+  #   trigger:
+  #     - platform: state
+  #       entity_id: !secret plus_switch
+  #       to: "on"
+  #   action:
+  #     - delay: "00:00:00.2"
+  #     - service: switch.turn_off
+  #       target:
+  #         entity_id: !secret plus_switch
+
+  # - id: normalize_minus_switch
+  #   alias: "Buttons: Normalize MINUS switch"
+  #   trigger:
+  #     - platform: state
+  #       entity_id: !secret minus_switch
+  #       to: "on"
+  #   action:
+  #     - delay: "00:00:00.2"
+  #     - service: switch.turn_off
+  #       target:
+  #         entity_id: !secret minus_switch
+
+  # - id: normalize_boost_switch
+  #   alias: "Buttons: Normalize BOOST switch"
+  #   trigger:
+  #     - platform: state
+  #       entity_id: !secret boost_switch
+  #       to: "on"
+  #   action:
+  #     - delay: "00:00:00.2"
+  #     - service: switch.turn_off
+  #       target:
+  #         entity_id: !secret boost_switch
+
+  ############################################
+  # ACTIVE AUTOMATIONS
+  ############################################
+
+  - id: ventilation_plus
+    alias: "Ventilation: PLUS pressed (+1)"
+    trigger:
+      - platform: state
+        entity_id: !secret plus_switch
+        to: "on"
+    condition:
+      - condition: state
+        entity_id: input_boolean.ventilation_system_active
+        state: "on"
+      - condition: numeric_state
+        entity_id: input_number.ilmanvaihto_taso
+        below: 5.1
+    action:
+      - service: script.ventilation_bump_level
+        data:
+          delta: 1
+
+  - id: ventilation_minus
+    alias: "Ventilation: MINUS pressed (-1)"
+    trigger:
+      - platform: state
+        entity_id: !secret minus_switch
+        to: "on"
+    condition:
+      - condition: state
+        entity_id: input_boolean.ventilation_system_active
+        state: "on"
+      - condition: numeric_state
+        entity_id: input_number.ilmanvaihto_taso
+        above: -0.1
+    action:
+      - service: script.ventilation_bump_level
+        data:
+          delta: -1
+
+  - id: ventilation_boost_handler
+    alias: "Ventilation: BOOST press handler"
+    trigger:
+      - platform: state
+        entity_id: !secret boost_switch
+        to: "on"
+    condition:
+      - condition: state
+        entity_id: input_boolean.ventilation_system_active
+        state: "on"
+    action:
+      - variables:
+          active: "{{ is_state('input_boolean.boost_active','on') }}"
+          extended: "{{ is_state('input_boolean.boost_extended','on') }}"
+          # Get the stored time (may be unknown/unavailable)
+          delta_sec: >-
+            {% set s = states('input_datetime.boost_last_press') %}
+            {% set last = 0 if s in ['unknown','unavailable',''] else as_timestamp(as_datetime(s)) %}
+            {{ (as_timestamp(now()) - last) | int }}
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ not active }}"
+            sequence:
+              - service: script.ventilation_boost_activate
+          - conditions:
+              - condition: template
+                value_template: "{{ active and (not extended) and (delta_sec <= 10) }}"
+            sequence:
+              - service: script.ventilation_boost_extend
+          - conditions:
+              - condition: template
+                value_template: "{{ active and extended }}"
+            sequence:
+              - service: script.ventilation_boost_cancel
+        default:
+          - service: system_log.write
+            data:
+              level: warning
+              message: "BOOST press ignored (no matching condition)."
+
+  - id: ventilation_boost_timer_finished
+    alias: "Ventilation: Boost timer finished → mirror return"
+    trigger:
+      - platform: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.boost_timer
+    condition:
+      - condition: state
+        entity_id: input_boolean.ventilation_system_active
+        state: "on"
+    action:
+      - service: script.ventilation_boost_return
+
+  - id: ventilation_boost_reconcile_on_start
+    alias: "Ventilation: Reconcile Boost on HA start"
+    trigger:
+      - platform: homeassistant
+        event: start
+    condition:
+      - condition: state
+        entity_id: input_boolean.ventilation_system_active
+        state: "on"
+    action:
+      - variables:
+          active: "{{ is_state('input_boolean.boost_active','on') }}"
+          end_s: "{{ states('input_datetime.boost_end_time') }}"
+          expired: >
+            {% if end_s not in ['unknown','unavailable',''] %}
+              {{ now() > strptime(end_s, '%Y-%m-%d %H:%M:%S') }}
+            {% else %}
+              false
+            {% endif %}
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ active and expired }}"
+            sequence:
+              - service: script.ventilation_boost_return

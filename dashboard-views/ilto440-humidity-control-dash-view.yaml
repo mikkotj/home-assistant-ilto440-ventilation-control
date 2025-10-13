@@ -1,0 +1,195 @@
+title: Ventilation - shower RH calibration
+icon: mdi:shower-head
+type: sections
+layout:
+  max_columns: 2
+cards: []
+sections:
+  - type: grid
+    cards:
+      - type: gauge
+        name: Current Fan Level
+        entity: input_number.ilmanvaihto_taso
+        min: 0
+        max: 5
+        needle: true
+        severity:
+          green: 1
+          yellow: 3
+          red: 5
+        visibility:
+          - condition: state
+            entity: input_boolean.ventilation_system_active
+            state: "on"
+  - type: grid
+    cards:
+      - type: entities
+        title: Status
+        show_header_toggle: false
+        entities:
+          - entity: sensor.anturi_th_bathroom1_humidity
+            name: Bathroom Humidity (%RH)
+          - entity: sensor.deriv_bathroom1_humidity
+            name: Bathroom Humidity Derivative (%RH/s)
+          - entity: sensor.anturi_th_bathroom2_humidity
+            name: Bathroom2 Humidity (%RH)
+          - entity: sensor.deriv_bathroom2_humidity
+            name: Bathroom2 Humidity Derivative (%HR/s)
+          - entity: automation.ventilation_increase_on_humidity_derivative_or_level
+            name: "Auto: Increase on Derivative/Level"
+  - type: grid
+    cards:
+      - type: custom:apexcharts-card
+        header:
+          title: Bathroom Humidity & Derivative
+          show: true
+          show_states: true
+          colorize_states: true
+        graph_span: 6h
+        update_interval: 30s
+        experimental:
+          color_threshold: true
+        show:
+          last_updated: true
+        yaxis:
+          - id: left
+            show: true
+            decimals: 0
+            opposite: true
+            min: 20
+            max: 80
+            apex_config:
+              tickAmount: 6
+          - id: right
+            show: true
+            decimals: 2
+            opposite: false
+            min: -0.05
+            max: 0.3
+            apex_config:
+              tickAmount: 5
+        apex_config:
+          legend:
+            position: top
+          dataLabels:
+            enabled: false
+        series:
+          - entity: sensor.anturi_th_bathroom1_humidity
+            name: PH %RH
+            yaxis_id: left
+            type: line
+            curve: smooth
+            color: "#1E88E5"
+            stroke_width: 3
+          - entity: sensor.deriv_bathroom1_humidity
+            name: PH %RH/s
+            yaxis_id: right
+            type: line
+            curve: smooth
+            color: red
+            stroke_width: 1
+          - entity: input_number.threshold_humidity_percent
+            name: Humidity Threshold %RH
+            yaxis_id: left
+            type: line
+            color: lightblue
+            stroke_width: 1
+            transform: return Number(entity.state);
+            group_by:
+              duration: 1min
+              func: last
+          - entity: input_number.threshold_derivative_high
+            name: Derivative Threshold %RH/s
+            yaxis_id: right
+            type: line
+            color: orange
+            stroke_width: 1
+            transform: return Number(entity.state);
+            group_by:
+              duration: 1min
+              func: last
+      - type: custom:apexcharts-card
+        header:
+          title: Bathroom 2 Humidity & Derivative
+          show: true
+          show_states: true
+          colorize_states: true
+        graph_span: 6h
+        update_interval: 30s
+        experimental:
+          color_threshold: true
+        show:
+          last_updated: true
+        yaxis:
+          - id: left
+            show: true
+            decimals: 0
+            opposite: true
+            min: 20
+            max: 80
+          - id: right
+            show: true
+            decimals: 2
+            opposite: false
+            min: -0.1
+            max: 0.25
+        apex_config:
+          legend:
+            position: top
+          dataLabels:
+            enabled: false
+        series:
+          - entity: sensor.anturi_th_bathroom2_humidity
+            name: Humidity (%RH)
+            yaxis_id: left
+            type: line
+            curve: smooth
+            color: "#1E88E5"
+            stroke_width: 3
+          - entity: sensor.deriv_bathroom2_humidity
+            name: Derivative (%RH/s)
+            yaxis_id: right
+            type: line
+            curve: smooth
+            color: "#FB8C00"
+            stroke_width: 1
+          - entity: input_number.threshold_humidity_percent
+            name: Humidity Threshold (%RH)
+            yaxis_id: left
+            type: line
+            color: "#1565C0"
+            stroke_width: 2
+            transform: return Number(entity.state);
+            group_by:
+              duration: 1min
+              func: last
+          - entity: input_number.threshold_derivative_high
+            name: Derivative Threshold (%RH/s)
+            yaxis_id: right
+            type: line
+            color: "#E64A19"
+            stroke_width: 2
+            transform: return Number(entity.state);
+            group_by:
+              duration: 1min
+              func: last
+  - type: grid
+    cards:
+      - type: entities
+        title: Controls & Helpers
+        show_header_toggle: false
+        entities:
+          - entity: input_select.method_trigger_mode
+            name: Trigger Mode (derivative / humidity / both)
+          - entity: input_select.monitored_source
+          - entity: input_number.threshold_derivative_high
+            name: Derivative Threshold (%RH/s)
+          - entity: input_number.threshold_humidity_percent
+            name: Humidity Threshold (%RH)
+          - type: divider
+          - entity: input_select.method_ventilation_increase
+            name: Ventilation Increase Method
+          - entity: input_number.steps_to_increase
+          - entity: input_number.delay_reverse_seconds
+          - entity: input_number.threshold_humidity_drop
+max_columns: 2

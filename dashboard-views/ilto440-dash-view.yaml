@@ -1,0 +1,183 @@
+title: ILTO440 Ventilation View
+cards: []
+type: sections
+background:
+  opacity: 33
+  alignment: center
+  size: cover
+  repeat: repeat
+  attachment: fixed
+sections:
+  - type: grid
+    cards:
+      - type: heading
+        heading: Ventilation system parameters
+        heading_style: title
+      - type: conditional
+        conditions:
+          - entity: input_boolean.ventilation_system_active
+            state: "off"
+        card:
+          type: markdown
+          content: |
+            ## 🚫 Ventilation controls disabled
+            Turn **Ventilation System Active** ON to enable controls.
+      - type: entities
+        title: System
+        show_header_toggle: false
+        entities:
+          - entity: input_boolean.ventilation_system_active
+            name: Ventilation System Active
+          - entity: input_number.ilmanvaihto_taso
+            name: Current Level (0 = Off)
+          - entity: input_boolean.boost_active
+            name: Boost Active
+          - entity: input_boolean.boost_extended
+            name: Boost Extended
+          - entity: input_datetime.boost_end_time
+            name: Boost Ends At
+          - entity: timer.boost_timer
+            name: Boost Timer
+      - type: conditional
+        conditions:
+          - entity: input_boolean.ventilation_system_active
+            state: "on"
+        card:
+          type: vertical-stack
+          cards:
+            - type: entities
+              title: Boost Timing
+              show_header_toggle: false
+              entities:
+                - entity: sensor.boost_last_press_time
+                  name: Boost Last Press (Time Only)
+                  icon: mdi:clock-outline
+                - entity: input_datetime.boost_end_time
+                  name: Boost Ends At
+                  icon: mdi:clock-end
+                - entity: timer.boost_timer
+                  name: Boost Timer
+                  icon: mdi:timer
+        grid_options:
+          columns: 12
+          rows: auto
+      - type: history-graph
+        entities:
+          - entity: switch.kytkin_smart_switch_l1
+          - entity: switch.kytkin_smart_switch_l2
+          - entity: switch.kytkin_smart_switch_l3
+        title: Relay status for debugging
+        logarithmic_scale: false
+        hours_to_show: 0.05
+  - type: grid
+    cards:
+      - type: heading
+        heading: ILTO440 ventilation sample dashboard view
+        heading_style: title
+        icon: mdi:air-conditioner
+      - type: conditional
+        conditions:
+          - entity: input_boolean.ventilation_system_active
+            state: "on"
+        card:
+          type: vertical-stack
+          cards:
+            - type: gauge
+              name: Current Fan Level
+              entity: input_number.ilmanvaihto_taso
+              min: 0
+              max: 5
+              needle: true
+              severity:
+                green: 1
+                yellow: 3
+                red: 5
+            - type: horizontal-stack
+              cards:
+                - show_name: true
+                  show_icon: true
+                  type: button
+                  name: Minus
+                  icon: mdi:minus-circle-outline
+                  tap_action:
+                    action: call-service
+                    service: switch.turn_on
+                    target:
+                      entity_id: switch.kytkin_smart_switch_l1
+                  show_state: false
+                - type: button
+                  name: Plus
+                  icon: mdi:plus-circle-outline
+                  tap_action:
+                    action: call-service
+                    service: switch.turn_on
+                    target:
+                      entity_id: switch.kytkin_smart_switch_l2
+            - type: conditional
+              conditions:
+                - entity: input_boolean.boost_active
+                  state: "off"
+              card:
+                show_name: true
+                show_icon: true
+                type: button
+                name: Boost (30 min)
+                icon: mdi:rocket-launch-outline
+                tap_action:
+                  action: call-service
+                  service: switch.turn_on
+                  target:
+                    entity_id: switch.kytkin_smart_switch_l3
+            - type: conditional
+              conditions:
+                - entity: input_boolean.boost_active
+                  state: "on"
+                - entity: input_boolean.boost_extended
+                  state: "off"
+              card:
+                type: button
+                name: Extend to 60 min
+                icon: mdi:arrow-expand-horizontal
+                tap_action:
+                  action: call-service
+                  service: switch.turn_on
+                  target:
+                    entity_id: switch.kytkin_smart_switch_l3
+            - type: conditional
+              conditions:
+                - entity: input_boolean.boost_active
+                  state: "on"
+                - entity: input_boolean.boost_extended
+                  state: "on"
+              card:
+                type: button
+                name: Cancel Boost
+                icon: mdi:close-octagon-outline
+                tap_action:
+                  action: call-service
+                  service: switch.turn_on
+                  target:
+                    entity_id: switch.kytkin_smart_switch_l3
+            - type: button
+              name: Resync Level (via 0)
+              icon: mdi:sync
+              tap_action:
+                action: call-service
+                service: script.ventilation_sync_level_via_relays
+              confirmation:
+                text: >-
+                  This will press MINUS 6× to reach 0, then PLUS to the current
+                  UI level. Proceed?
+            - type: button
+              name: Resync to 3 (via 0)
+              icon: mdi:numeric-3-circle-outline
+              tap_action:
+                action: call-service
+                service: script.ventilation_sync_level_via_relays
+                data:
+                  target_level: 3
+              confirmation:
+                text: Press MINUS 6× to reach 0, then PLUS to 3. Proceed?
+        grid_options:
+          columns: 6
+          rows: auto

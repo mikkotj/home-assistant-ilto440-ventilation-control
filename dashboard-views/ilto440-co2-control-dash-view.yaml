@@ -1,0 +1,212 @@
+type: sections
+max_columns: 2
+title: CO2
+path: ilto440-co2-control
+icon: mdi:molecule-co2
+sections:
+  - type: grid
+    column_span: 2
+    cards:
+      - type: heading
+        heading: New section
+      - type: entities
+        title: CO2 Status
+        show_header_toggle: false
+        entities:
+          - entity: automation.ventilation_increase_on_co2_level_derivative
+            name: "Auto: Increase on CO2 Level/Derivative"
+          - entity: input_select.co2_trigger_mode
+            name: CO2 Trigger Mode
+          - entity: input_select.method_ventilation_increase
+            name: Ventilation Increase Method
+      - type: entities
+        title: CO2 Thresholds
+        show_header_toggle: false
+        entities:
+          - entity: input_number.co2_level_threshold_ppm
+            name: CO2 Level Threshold (ppm)
+          - entity: input_number.co2_derivative_threshold_ppm_min
+            name: CO2 Derivative Threshold (ppm/min)
+          - entity: input_number.co2_drop_threshold_ppm
+            name: CO2 Drop Threshold (ppm)
+      - type: entities
+        title: Ventilation Action Parameters
+        show_header_toggle: false
+        entities:
+          - entity: input_number.steps_to_increase
+            name: Steps to Increase
+          - entity: input_number.delay_reverse_seconds
+            name: Reverse Delay (s)
+          - entity: input_number.timeout_monitor_seconds
+            name: Monitor Timeout (s)
+  - type: grid
+    cards:
+      - type: custom:apexcharts-card
+        header:
+          title: CO2 Levels + Threshold
+        graph_span: 6h
+        update_interval: 30s
+        experimental:
+          color_threshold: true
+        show:
+          last_updated: true
+        yaxis:
+          - id: left
+            show: true
+            opposite: false
+            decimals: 0
+        apex_config:
+          legend:
+            position: top
+          dataLabels:
+            enabled: false
+        series:
+          - entity: sensor.anturi_thcnp_wstation_co2
+            name: Wstation CO2
+            yaxis_id: left
+            type: line
+            curve: smooth
+            color: "#66CCFF"
+            stroke_width: 1
+            show:
+              extremas: true
+              header_color_threshold: true
+            color_threshold:
+              - value: 0
+                color: "#66CCFF"
+              - value: 800
+                color: "#0099E6"
+              - value: 1200
+                color: "#004D79"
+          - entity: sensor.anturi_thc_room1_co2
+            name: Room1 CO2
+            yaxis_id: left
+            type: line
+            curve: smooth
+            color: "#43A047"
+            stroke_width: 1
+            show:
+              extremas: true
+              header_color_threshold: true
+            color_threshold:
+              - value: 0
+                color: "#A3FF47"
+              - value: 800
+                color: "#66CC00"
+              - value: 1200
+                color: "#336600"
+          - entity: sensor.anturi_thc_room2_co2
+            name: Room2 CO2
+            yaxis_id: left
+            type: line
+            curve: smooth
+            color: "#1565C0"
+            stroke_width: 1
+            show:
+              extremas: true
+              header_color_threshold: true
+            color_threshold:
+              - value: 0
+                color: "#CC99CC"
+              - value: 800
+                color: "#993399"
+              - value: 1200
+                color: "#4D004D"
+          - entity: sensor.anturi_thc_room3_co2
+            name: Room3 Huone CO2
+            yaxis_id: left
+            type: line
+            curve: smooth
+            color: "#EC407A"
+            stroke_width: 1
+            show:
+              extremas: true
+              header_color_threshold: true
+            color_threshold:
+              - value: 0
+                color: "#FFCC66"
+              - value: 800
+                color: "#FF8800"
+              - value: 1200
+                color: "#B36200"
+          - entity: input_number.co2_level_threshold_ppm
+            name: Level Threshold (ppm)
+            yaxis_id: left
+            type: line
+            color: "#BF360C"
+            stroke_width: 2
+            transform: return Number(entity.state);
+            group_by:
+              duration: 1min
+              func: last
+  - type: grid
+    cards:
+      - type: custom:apexcharts-card
+        header:
+          title: CO2 Derivative + Threshold
+        graph_span: 3h
+        update_interval: 30s
+        show:
+          last_updated: true
+        yaxis:
+          - id: right
+            show: true
+            opposite: false
+            decimals: 0
+        apex_config:
+          legend:
+            position: top
+          dataLabels:
+            enabled: false
+        series:
+          - entity: sensor.deriv_wstation_co2
+            name: Wstation dCO2
+            yaxis_id: right
+            type: line
+            curve: smooth
+            color: "#66CCFF"
+            stroke_width: 1
+            show:
+              extremas: true
+              header_color_threshold: true
+          - entity: sensor.deriv_room1_co2
+            name: Room1 dCO2
+            yaxis_id: right
+            type: line
+            curve: smooth
+            color: "#43A047"
+            stroke_width: 1
+            show:
+              extremas: true
+              header_color_threshold: true
+          - entity: sensor.deriv_room2_co2
+            name: Room2 dCO2
+            yaxis_id: right
+            type: line
+            curve: smooth
+            color: "#1565C0"
+            stroke_width: 1
+            show:
+              extremas: true
+              header_color_threshold: true
+          - entity: sensor.deriv_room3_co2
+            name: Room3 Huone dCO2
+            yaxis_id: right
+            type: line
+            curve: smooth
+            color: "#EC407A"
+            stroke_width: 1
+            show:
+              extremas: true
+              header_color_threshold: true
+          - entity: input_number.co2_derivative_threshold_ppm_min
+            name: Derivative Threshold (ppm/min)
+            yaxis_id: right
+            type: line
+            color: "#8E24AA"
+            stroke_width: 2
+            transform: return Number(entity.state);
+            group_by:
+              duration: 1min
+              func: last
+cards: []
