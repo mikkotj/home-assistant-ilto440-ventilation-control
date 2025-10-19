@@ -1,0 +1,497 @@
+############################################
+#  Ventilation increase on CO₂ (level-only)
+#  Package: ventilation_co2_control.yaml
+#  Version: 2.1.1
+#  Date: 2025-10-18 16:58 EET
+#  Author: Mikko Jylhä
+#
+#  CHANGELOG
+#  2.1 → 2.1.1 (this file):
+#    - Renamed M2 wait timer and helper sensor to disambiguate:
+#        timer.co2_reverse_wait            → timer.co2_m2_reverse_wait
+#        sensor.co2_reverse_wait_remaining_s → sensor.co2_m2_reverse_wait_remaining_s
+#    - Updated ALL references in template sensors, automations and dashboard.
+#    - Fixed minor indent/spacing issues in the timer section.
+#
+#  2.0 → 2.1:
+#    - Method 2 (N up → wait → N down) verified working.
+#    - FIX: automation could not retrigger while CO₂ stayed above threshold.
+#      Added a 10s time_pattern "poll" trigger and moved the threshold check
+#      into conditions, so after cooldown it can run again if still above.
+#    - Kept warning-level logs; added average of the CO₂ group for plotting.
+#
+#  1.9.2 → 2.0
+#    - Removed ALL derivative handling (entities, triggers, logic, dashboards).
+#    - Kept three action methods:
+#        • single_service (press BOOST once; HW reverts),
+#        • pulse_then_wait_then_reverse (N up → wait → N down),
+#        • pulse_until_below (N up → wait until any CO₂ < drop or timeout → N down).
+#    - Kept re-arm guard (co2_action_running, co2_last_completed, co2_min_rearm_seconds).
+#    - Kept visible wait timer (timer.co2_m2_reverse_wait) + helper sensor for remaining seconds.
+#
+#  1.5 → 1.6
+#    - CO₂ helpers renamed to CO₂-specific ids to avoid clashes with humidity:
+#      co2_steps_to_increase, co2_delay_reverse_seconds, co2_timeout_monitor_seconds.
+#    - Merged duplicate input_select blocks; improved logging.
+#    - Kept three methods: single_service, pulse_then_wait_then_reverse, pulse_until_below.
+#
+#  1.6 → 1.7
+#    - Added triggered template sensors (every 10 s):
+#      sensor.co2_max_level, sensor.co2_max_derivative (max across groups).
+#    - Triggers used these max sensors for stable comparisons.
+#
+#  1.7 → 1.8
+#    - Replaced numeric_state triggers with template + for: 30s to avoid
+#      “expected float” issues across HA versions.
+#
+#  1.8 → 1.9
+#    - Removed redundant “gate” trigger and unused binary gate; simplified re-arm logic.
+#    - Added visible wait timer (now timer.co2_m2_reverse_wait) for Method 2.
+#
+#  1.9 → 1.9.2
+#    - LAST version that had CO₂ derivatives in control logic; removed since they fluctuate too fast.
+############################################
+#  REQUIREMENTS
+#   - /config/secrets.yaml defines:
+#       boost_switch_b: switch.kytkin_smart_switch_l3
+#       plus_switch_b:  switch.kytkin_smart_switch_l2
+#       minus_switch_b: switch.kytkin_smart_switch_l1
+############################################
+
+
+############################################
+#         CO₂ SENSOR LIST (EDIT HERE)      #
+############################################
+group:
+  co2_sensors:
+    name: "CO2 Sensors"
+    entities:
+      - sensor.anturi_thcnp_saaasema_co2
+      - sensor.anturi_thc_room1_co2
+      - sensor.anturi_thc_room2_co2
+      - sensor.anturi_thc_room3_co2
+
+  # Optional: keep for plotting only (not used in control logic)
+  co2_derivative_sensors:
+    name: "CO2 Derivative Sensors"
+    entities:
+      - sensor.deriv_anturi_thcnp_saaasema_co2
+      - sensor.deriv_anturi_thc_room1_co2
+      - sensor.deriv_anturi_thc_room2_co2
+      - sensor.deriv_anturi_thc_room3_co2
+
+
+############################################
+#                 HELPERS                  #
+############################################
+input_select:
+  method_ventilation_increase:
+    name: "CO2 Ventilation Method"
+    options:
+      - single_service
+      - pulse_then_wait_then_reverse
+      - pulse_until_below
+    icon: mdi:script-text-outline
+
+input_number:
+  co2_level_threshold_ppm:
+    name: "CO2 Level Threshold (ppm)"
+    min: 400
+    max: 3000
+    step: 25
+    mode: box
+    icon: mdi:gauge
+    initial: 900
+
+  co2_drop_threshold_ppm:
+    name: "CO2 Drop Threshold (ppm)"
+    min: 400
+    max: 3000
+    step: 25
+    mode: box
+    icon: mdi:gauge
+    initial: 800
+
+  co2_steps_to_increase:
+    name: "Steps to Increase Ventilation (CO2)"
+    min: 0
+    max: 5
+    step: 1
+    mode: slider
+    icon: mdi:counter
+    initial: 1
+
+  co2_delay_reverse_seconds:
+    name: "Delay Before Reverting (CO2, s)"
+    min: 0
+    max: 7200
+    step: 5
+    mode: box
+    icon: mdi:timer-sand
+    initial: 900
+
+  co2_timeout_monitor_seconds:
+    name: "Monitor Timeout (CO2, s)"
+    min: 0
+    max: 86400
+    step: 10
+    mode: box
+    icon: mdi:timer-off-outline
+    initial: 3600
+
+  co2_min_rearm_seconds:
+    name: "CO2 Min Re-arm (s)"
+    min: 0
+    max: 3600
+    step: 5
+    mode: box
+    icon: mdi:timer-lock-outline
+    initial: 600
+
+input_boolean:
+  co2_action_running:
+    name: "CO2 Action Running"
+    icon: mdi:progress-clock
+
+input_datetime:
+  co2_last_completed:
+    name: "CO2 Last Completed"
+    has_date: true
+    has_time: true
+
+# Visible countdowns for Method 2 & Method 3
+timer:
+  co2_m2_reverse_wait:
+    name: "CO2 M2 Reverse Wait"
+    duration: "00:00:00"    # real duration set dynamically
+
+  co2_m3_monitor_timeout:
+    name: "CO2 Method 3 Monitor Timeout"
+    duration: "00:00:00"    # real duration set dynamically
+
+
+############################################
+#        HELPER TEMPLATE SENSORS           #
+############################################
+# Updates on HA start, every 10 s, and when the group membership or threshold changes.
+template:
+  - trigger:
+      - platform: homeassistant
+        event: start
+      - platform: time_pattern
+        seconds: "/10"
+      - platform: state
+        entity_id:
+          - group.co2_sensors                      # recompute max when any CO₂ changes
+          - input_number.co2_level_threshold_ppm   # recompute when threshold changes
+          - timer.co2_m2_reverse_wait              # recompute M2 wait remaining when timer starts/stops
+          - timer.co2_m3_monitor_timeout           # recompute M3 timeout remaining when timer starts/stops
+    sensor:
+      - name: "CO2 Max Level"
+        unique_id: co2_max_level
+        unit_of_measurement: "ppm"
+        icon: mdi:molecule-co2
+        state: >-
+          {# Expand group to entities; more reliable than state_attr #}
+          {% set es = expand('group.co2_sensors') or [] %}
+          {% set numeric = es
+               | selectattr('state','is_number')
+               | map(attribute='state') | map('float') | list %}
+          {% if numeric | length > 0 %}
+            {{ (numeric | max) | round(1) }}
+          {% else %}
+            {# Fallback: keep previous numeric value instead of going unknown #}
+            {{ states('sensor.co2_max_level') | float(0) }}
+          {% endif %}
+        attributes:
+          source: >-
+            {% set es = expand('group.co2_sensors') or [] %}
+            {% set vals = es | selectattr('state','is_number') | list %}
+            {% if (vals | length) == 0 %}
+              {{ state_attr('sensor.co2_max_level','source') or 'unknown' }}
+            {% else %}
+              {% set maxv = vals | map(attribute='state') | map('float') | max %}
+              {% for e in vals %}
+                {% if (e.state | float) == maxv %}
+                  {{ e.entity_id }}
+                  {% break %}
+                {% endif %}
+              {% endfor %}
+            {% endif %}
+
+      - name: "CO2 Level Trigger Active"
+        unique_id: co2_level_trigger_active
+        icon: mdi:check-circle
+        state: >-
+          {{ states('sensor.co2_max_level')|float(0) >=
+             states('input_number.co2_level_threshold_ppm')|float(0) }}
+
+      - name: "CO2 M2 Reverse Wait Remaining (s)"
+        unique_id: co2_m2_reverse_wait_remaining_s
+        unit_of_measurement: "s"
+        icon: mdi:timer-sand
+        state: >-
+          {% if is_state('timer.co2_m2_reverse_wait','active') %}
+            {% set rem = state_attr('timer.co2_m2_reverse_wait','remaining') | string %}
+            {% set p = rem.split(':') %}
+            {% set h = p[0] | int(0) %}
+            {% set m = p[1] | int(0) %}
+            {% set s = p[2] | int(0) %}
+            {{ h*3600 + m*60 + s }}
+          {% else %}
+            0
+          {% endif %}
+
+      - name: "CO2 M3 Timeout Remaining (s)"
+        unique_id: co2_m3_monitor_timeout_remaining_s
+        unit_of_measurement: "s"
+        icon: mdi:timer-sand
+        state: >-
+          {% if is_state('timer.co2_m3_monitor_timeout', 'active') %}
+            {% set rem = state_attr('timer.co2_m3_monitor_timeout', 'remaining') | string %}
+            {% set parts = rem.split(':') %}
+            {% set h = parts[0] | int(0) %}
+            {% set m = parts[1] | int(0) %}
+            {% set s = parts[2] | int(0) %}
+            {{ h*3600 + m*60 + s }}
+          {% else %}
+            0
+          {% endif %}
+
+      - name: "CO2 Average Level"
+        unique_id: co2_avg_level
+        unit_of_measurement: "ppm"
+        icon: mdi:chart-line
+        state: >-
+          {% set es = expand('group.co2_sensors') or [] %}
+          {% set numeric = es | selectattr('state','is_number') | map(attribute='state') | map('float') | list %}
+          {% if numeric | length > 0 %}
+            {{ (numeric | average) | round(1) }}
+          {% else %}
+            0
+          {% endif %}
+        attributes:
+          sensors_included: >-
+            {{ state_attr('group.co2_sensors', 'entity_id') }}
+
+      # Optional plotting helper only (not used in control)
+      - name: "CO2 Average Derivative"
+        unique_id: co2_avg_derivative
+        unit_of_measurement: "ppm/min"
+        icon: mdi:chart-bell-curve-cumulative
+        state: >-
+          {% set es = expand('group.co2_derivative_sensors') or [] %}
+          {% set numeric = es | selectattr('state','is_number') | map(attribute='state') | map('float') | list %}
+          {% if numeric | length > 0 %}
+            {{ (numeric | average) | round(1) }}
+          {% else %}
+            0
+          {% endif %}
+        attributes:
+          sensors_included: >-
+            {{ state_attr('group.co2_derivative_sensors', 'entity_id') }}
+
+
+############################################
+#                AUTOMATION                #
+############################################
+automation:
+  - id: co2_ventilation_increase
+    alias: "CO2 Ventilation Increase"
+    mode: single
+    description: >
+      Triggers when CO₂ level (max across configured sensors) is at/above threshold
+      for 30s OR via a 10s poll if still above after cooldown. Methods:
+      single_service, pulse_then_wait_then_reverse, pulse_until_below.
+
+    trigger:
+      # Edge trigger: fires when the comparison becomes true and stays true 30s
+      - id: level
+        platform: template
+        value_template: >-
+          {{ states('sensor.co2_max_level')|float(0) >=
+             states('input_number.co2_level_threshold_ppm')|float(0) }}
+        for: "00:00:30"
+
+      # Poll trigger: evaluates conditions every 10s so we can rerun after cooldown
+      - id: poll
+        platform: time_pattern
+        seconds: "/10"
+
+    # Re-arm & single-flight guard + threshold check (so the poll is safe)
+    condition:
+      - condition: state
+        entity_id: input_boolean.co2_action_running
+        state: 'off'
+      - condition: template
+        value_template: >-
+          {% set last = states('input_datetime.co2_last_completed') %}
+          {% set rearm = states('input_number.co2_min_rearm_seconds')|int(0) %}
+          {% set last_ts = 0 if last in ['unknown','unavailable',''] else as_timestamp(as_datetime(last)) %}
+          {{ (as_timestamp(now()) - last_ts) >= rearm }}
+      - condition: template
+        value_template: >-
+          {{ states('sensor.co2_max_level')|float(0) >=
+             states('input_number.co2_level_threshold_ppm')|float(0) }}
+
+    variables:
+      boost_switch_b: !secret boost_switch_b
+      plus_switch_b:  !secret plus_switch_b
+      minus_switch_b: !secret minus_switch_b
+
+    action:
+      # Guard ON
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.co2_action_running
+      - service: system_log.write
+        data:
+          level: warning
+          message: "CO2/LVL: action start (method={{ states('input_select.method_ventilation_increase') }}, max={{ states('sensor.co2_max_level') }}, thr={{ states('input_number.co2_level_threshold_ppm') }})"
+
+      - choose:
+
+          # METHOD 1 — Boost once
+          - conditions:
+              - condition: template
+                value_template: "{{ states('input_select.method_ventilation_increase') == 'single_service' }}"
+            sequence:
+              - service: system_log.write
+                data:
+                  level: warning
+                  message: "CO2/LVL: single_service → press BOOST once"
+              - service: switch.turn_on
+                target:
+                  entity_id: "{{ boost_switch_b }}"
+
+          # METHOD 2 — N up → wait → N down
+          - conditions:
+              - condition: template
+                value_template: "{{ states('input_select.method_ventilation_increase') == 'pulse_then_wait_then_reverse' }}"
+            sequence:
+              - variables:
+                  steps: "{{ states('input_number.co2_steps_to_increase')|int(0) }}"
+                  wait_s: "{{ states('input_number.co2_delay_reverse_seconds')|int(0) }}"
+              - service: system_log.write
+                data:
+                  level: warning
+                  message: "CO2/LVL: pulse_then_wait_then_reverse → up {{ steps }}, wait {{ wait_s }}s, then down"
+              - repeat:
+                  count: "{{ steps }}"
+                  sequence:
+                    - service: switch.turn_on
+                      target:
+                        entity_id: "{{ plus_switch_b }}"
+                    - delay: "00:00:01"
+
+              # visible countdown while waiting (M2)
+              - service: timer.start
+                target:
+                  entity_id: timer.co2_m2_reverse_wait
+                data:
+                  duration: >-
+                    {{ '%02d:%02d:%02d' | format(
+                        (wait_s|int(0)) // 3600,
+                        ((wait_s|int(0)) % 3600) // 60,
+                        (wait_s|int(0)) % 60 ) }}
+
+              - delay:
+                  seconds: "{{ wait_s }}"
+              - repeat:
+                  count: "{{ steps }}"
+                  sequence:
+                    - service: switch.turn_on
+                      target:
+                        entity_id: "{{ minus_switch_b }}"
+                    - delay: "00:00:01"
+              - service: system_log.write
+                data:
+                  level: warning
+                  message: "CO2/LVL: reverse complete"
+
+          # METHOD 3 — N up → monitor level drop → N down
+          - conditions:
+              - condition: template
+                value_template: "{{ states('input_select.method_ventilation_increase') == 'pulse_until_below' }}"
+            sequence:
+              - variables:
+                  steps: "{{ states('input_number.co2_steps_to_increase')|int(0) }}"
+                  drop_thr: "{{ states('input_number.co2_drop_threshold_ppm')|float(0) }}"
+                  tmo: "{{ states('input_number.co2_timeout_monitor_seconds')|int(0) }}"
+              - service: system_log.write
+                data:
+                  level: warning
+                  message: "CO2/LVL: pulse_until_below → up {{ steps }}, wait until any < {{ drop_thr }} (tmo {{ tmo }}s)"
+              - repeat:
+                  count: "{{ steps }}"
+                  sequence:
+                    - service: switch.turn_on
+                      target:
+                        entity_id: "{{ plus_switch_b }}"
+                    - delay: "00:00:01"
+
+              # Visible timeout countdown for Method 3 (start)
+              - choose:
+                  - conditions:
+                      - condition: template
+                        value_template: "{{ tmo|int(0) > 0 }}"
+                    sequence:
+                      - service: timer.start
+                        target:
+                          entity_id: timer.co2_m3_monitor_timeout
+                        data:
+                          duration: >-
+                            {{ '%02d:%02d:%02d' | format(
+                                (tmo|int(0)) // 3600,
+                                ((tmo|int(0)) % 3600) // 60,
+                                (tmo|int(0)) % 60 ) }}
+
+              - wait_for_trigger:
+                  - platform: template
+                    value_template: >-
+                      {% set ids = state_attr('group.co2_sensors', 'entity_id') or [] %}
+                      {% for id in ids %}
+                        {% if (states(id)|float(0)) < drop_thr %}
+                          {{ true }}
+                        {% endif %}
+                      {% endfor %}
+                      {{ false }}
+                timeout: >-
+                  {{ tmo|int(0) if tmo|int(0) > 0 else 0 }}
+                continue_on_timeout: true
+
+              # Visible timeout countdown for Method 3 (stop)
+              - service: timer.cancel
+                target:
+                  entity_id: timer.co2_m3_monitor_timeout
+
+              - service: system_log.write
+                data:
+                  level: warning
+                  message: "CO2/LVL: drop/timeout → step down {{ steps }}"
+              - repeat:
+                  count: "{{ steps }}"
+                  sequence:
+                    - service: switch.turn_on
+                      target:
+                        entity_id: "{{ minus_switch_b }}"
+                    - delay: "00:00:01"
+              - service: system_log.write
+                data:
+                  level: warning
+                  message: "CO2/LVL: pulse_until_below complete"
+        default: []
+
+      # Cleanup & re-arm
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.co2_action_running
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.co2_last_completed
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+      - service: system_log.write
+        data:
+          level: warning
+          message: "CO2/LVL: action done; re-arm ready"

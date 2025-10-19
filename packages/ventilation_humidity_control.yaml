@@ -1,0 +1,387 @@
+############################################
+#  Ventilation increase on Humidity (RH%)
+#  Package: ventilation_humidity_control.yaml
+#  Version: 2.1.1
+#  Date: 2025-10-19 18:30 EET
+#  Author: Mikko Jylhä
+#
+#  CHANGELOG
+#  2.1 → 2.1.1
+#    - Added group.humidity_sensors for all humidity entities.
+#    - Added "safe boot" startup guard similar to CO₂ control.
+#    - Added triggered template sensors for max/average humidity.
+#    - Harmonized naming, timers, and conditions with CO₂ package v2.1.1.
+#
+#  2.0 → 2.1
+#    - Improved rearm guard and added visible wait timer.
+#    - Adjusted humidity thresholds and derivative handling.
+#
+#  1.0 → 2.0
+#    - Added humidity derivative trigger handling.
+#    - Simplified automation logic (single-service, pulse-then-wait, etc.)
+############################################
+#  REQUIREMENTS
+#   - /config/secrets.yaml defines:
+#       plus_switch_b:  switch.kytkin_smart_switch_l2
+#       minus_switch_b: switch.kytkin_smart_switch_l1
+#       boost_switch_b: switch.kytkin_smart_switch_l3
+############################################
+
+
+############################################
+#         HUMIDITY SENSOR LIST (EDIT)      #
+############################################
+group:
+  humidity_sensors:
+    name: "Humidity Sensors"
+    entities:
+      - sensor.anturi_th_bathroom1_humidity
+      - sensor.anturi_th_bathroom2_humidity
+      - sensor.anturi_th_bedroom1_humidity
+      - sensor.anturi_th_bedroom2_humidity
+
+
+############################################
+#                 HELPERS                  #
+############################################
+input_select:
+  method_ventilation_increase_humidity:
+    name: "Humidity Ventilation Method"
+    options:
+      - single_service
+      - pulse_then_wait_then_reverse
+      - pulse_until_below
+    icon: mdi:script-text-outline
+
+input_number:
+  threshold_humidity_percent:
+    name: "Humidity Threshold (%RH)"
+    min: 20
+    max: 100
+    step: 1
+    mode: box
+    icon: mdi:water-percent
+    initial: 70
+
+  threshold_derivative_high:
+    name: "Derivative Threshold (%RH/s)"
+    min: -0.1
+    max: 0.5
+    step: 0.01
+    mode: box
+    icon: mdi:chart-bell-curve-cumulative
+    initial: 0.1
+
+  threshold_humidity_drop:
+    name: "Humidity Drop Threshold (%RH)"
+    min: 10
+    max: 90
+    step: 1
+    mode: box
+    icon: mdi:water-percent
+    initial: 50
+
+  steps_to_increase_humidity:
+    name: "Steps to Increase Ventilation (Humidity)"
+    min: 0
+    max: 5
+    step: 1
+    mode: slider
+    icon: mdi:counter
+    initial: 1
+
+  delay_reverse_seconds_humidity:
+    name: "Delay Before Reverting (Humidity, s)"
+    min: 0
+    max: 7200
+    step: 5
+    mode: box
+    icon: mdi:timer-sand
+    initial: 900
+
+  timeout_monitor_seconds_humidity:
+    name: "Monitor Timeout (Humidity, s)"
+    min: 0
+    max: 86400
+    step: 10
+    mode: box
+    icon: mdi:timer-off-outline
+    initial: 3600
+
+  min_rearm_seconds_humidity:
+    name: "Humidity Min Re-arm (s)"
+    min: 0
+    max: 3600
+    step: 5
+    mode: box
+    icon: mdi:timer-lock-outline
+    initial: 60
+
+input_boolean:
+  humidity_action_running:
+    name: "Humidity Action Running"
+    icon: mdi:progress-clock
+
+input_datetime:
+  humidity_last_completed:
+    name: "Humidity Last Completed"
+    has_date: true
+    has_time: true
+
+timer:
+  humidity_m2_reverse_wait:
+    name: "Humidity Method 2 Wait"
+    duration: "00:00:00"
+  humidity_m3_monitor_timeout:
+    name: "Humidity Method 3 Monitor Timeout"
+    duration: "00:00:00"
+
+
+############################################
+#            TEMPLATE SENSORS              #
+############################################
+template:
+  - trigger:
+      - platform: homeassistant
+        event: start
+      - platform: time_pattern
+        seconds: "/10"
+      - platform: state
+        entity_id:
+          - group.humidity_sensors
+          - input_number.threshold_humidity_percent
+          - timer.humidity_m2_reverse_wait
+    sensor:
+      - name: "Humidity Max Level"
+        unique_id: humidity_max_level
+        unit_of_measurement: "%RH"
+        icon: mdi:water-percent
+        state: >-
+          {% set es = expand('group.humidity_sensors') or [] %}
+          {% set vals = es | selectattr('state','is_number')
+                           | map(attribute='state') | map('float') | list %}
+          {% if vals | length > 0 %}
+            {{ (vals | max) | round(1) }}
+          {% else %}
+            {{ states('sensor.humidity_max_level') | float(0) }}
+          {% endif %}
+
+      - name: "Humidity Average Level"
+        unique_id: humidity_avg_level
+        unit_of_measurement: "%RH"
+        icon: mdi:chart-line
+        state: >-
+          {% set es = expand('group.humidity_sensors') or [] %}
+          {% set vals = es | selectattr('state','is_number')
+                           | map(attribute='state') | map('float') | list %}
+          {% if vals | length > 0 %}
+            {{ (vals | average) | round(1) }}
+          {% else %}
+            0
+          {% endif %}
+
+      - name: "Humidity M2 Wait Remaining (s)"
+        unique_id: humidity_m2_wait_remaining_s
+        unit_of_measurement: "s"
+        icon: mdi:timer-sand
+        state: >-
+          {% if is_state('timer.humidity_m2_reverse_wait','active') %}
+            {% set rem = state_attr('timer.humidity_m2_reverse_wait','remaining') | string %}
+            {% set parts = rem.split(':') %}
+            {{ (parts[0]|int(0))*3600 + (parts[1]|int(0))*60 + (parts[2]|int(0)) }}
+          {% else %} 0 {% endif %}
+
+      - name: "Humidity M3 Timeout Remaining (s)"
+        unique_id: humidity_m3_timeout_remaining_s
+        unit_of_measurement: "s"
+        icon: mdi:timer-outline
+        state: >-
+          {% if is_state('timer.humidity_m3_monitor_timeout','active') %}
+            {% set rem = state_attr('timer.humidity_m3_monitor_timeout','remaining') | string %}
+            {% set parts = rem.split(':') %}
+            {{ (parts[0]|int(0))*3600 + (parts[1]|int(0))*60 + (parts[2]|int(0)) }}
+          {% else %} 0 {% endif %}
+
+
+############################################
+#           STARTUP SAFETY GUARD           #
+############################################
+input_boolean:
+  automation_ready_humidity:
+    name: "Humidity Automations Ready"
+    icon: mdi:shield-check
+
+template:
+  - binary_sensor:
+      - name: "Humidity Sensors Online"
+        unique_id: humidity_sensors_online
+        icon: mdi:water-percent
+        state: >-
+          {{ (expand('group.humidity_sensors')
+              | selectattr('state','is_number') | list | length) > 0 }}
+
+automation:
+  - id: boot_safety_hold_humidity_automations
+    alias: "Safety: Hold humidity automations until sensors online"
+    mode: single
+    trigger:
+      - platform: homeassistant
+        event: start
+    action:
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.automation_ready_humidity
+      - service: automation.turn_off
+        target:
+          entity_id: automation.ventilation_increase_on_humidity_derivative_or_level
+      - wait_template: "{{ is_state('binary_sensor.humidity_sensors_online','on') }}"
+        timeout: "00:05:00"
+        continue_on_timeout: true
+      - delay: "00:01:00"
+      - service: automation.turn_on
+        target:
+          entity_id: automation.ventilation_increase_on_humidity_derivative_or_level
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.automation_ready_humidity
+      - service: system_log.write
+        data:
+          level: warning
+          message: "BOOT SAFETY: Humidity sensors online; humidity automation enabled."
+
+
+############################################
+#              AUTOMATION                  #
+############################################
+automation:
+  - id: ventilation_increase_on_humidity_derivative_or_level
+    alias: "Ventilation: Increase on Humidity Derivative or Level"
+    mode: single
+    description: >
+      Increases ventilation when humidity exceeds threshold or derivative rises.
+
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.humidity_max_level
+        above: "{{ states('input_number.threshold_humidity_percent')|float(0) }}"
+        for: "00:00:30"
+      - platform: numeric_state
+        entity_id: sensor.deriv_pesuhuone_humidity
+        above: "{{ states('input_number.threshold_derivative_high')|float(0) }}"
+        for: "00:00:30"
+
+    condition:
+      - condition: state
+        entity_id: input_boolean.humidity_action_running
+        state: 'off'
+      - condition: state
+        entity_id: input_boolean.automation_ready_humidity
+        state: 'on'
+
+    variables:
+      plus_switch_b: !secret plus_switch_b
+      minus_switch_b: !secret minus_switch_b
+
+    action:
+      - service: input_boolean.turn_on
+        target: { entity_id: input_boolean.humidity_action_running }
+      - service: system_log.write
+        data:
+          level: warning
+          message: "HUMIDITY: trigger start (max={{ states('sensor.humidity_max_level') }} %RH)"
+
+      - choose:
+
+          # METHOD 1 — Boost once
+          - conditions:
+              - condition: template
+                value_template: "{{ states('input_select.method_ventilation_increase_humidity') == 'single_service' }}"
+            sequence:
+              - service: switch.turn_on
+                target: { entity_id: "{{ plus_switch_b }}" }
+
+          # METHOD 2 — N up → wait → N down
+          - conditions:
+              - condition: template
+                value_template: "{{ states('input_select.method_ventilation_increase_humidity') == 'pulse_then_wait_then_reverse' }}"
+            sequence:
+              - variables:
+                  steps: "{{ states('input_number.steps_to_increase_humidity')|int(0) }}"
+                  wait_s: "{{ states('input_number.delay_reverse_seconds_humidity')|int(0) }}"
+              - repeat:
+                  count: "{{ steps }}"
+                  sequence:
+                    - service: switch.turn_on
+                      target: { entity_id: "{{ plus_switch_b }}" }
+                    - delay: "00:00:01"
+              - service: timer.start
+                target: { entity_id: timer.humidity_m2_reverse_wait }
+                data:
+                  duration: >-
+                    {{ '%02d:%02d:%02d' | format(wait_s//3600, (wait_s%3600)//60, wait_s%60) }}
+              - delay: "00:{{ (wait_s//60) | string | zfill(2) }}:{{ (wait_s%60) | string | zfill(2) }}"
+              - repeat:
+                  count: "{{ steps }}"
+                  sequence:
+                    - service: switch.turn_on
+                      target: { entity_id: "{{ minus_switch_b }}" }
+                    - delay: "00:00:01"
+              - service: timer.cancel
+                target: { entity_id: timer.humidity_m2_reverse_wait }
+
+          # METHOD 3 — N up → monitor drop → N down
+          - conditions:
+              - condition: template
+                value_template: "{{ states('input_select.method_ventilation_increase_humidity') == 'pulse_until_below' }}"
+            sequence:
+              - variables:
+                  steps: "{{ states('input_number.steps_to_increase_humidity')|int(0) }}"
+                  drop_thr: "{{ states('input_number.threshold_humidity_drop')|float(0) }}"
+                  tmo: "{{ states('input_number.timeout_monitor_seconds_humidity')|int(0) }}"
+              - repeat:
+                  count: "{{ steps }}"
+                  sequence:
+                    - service: switch.turn_on
+                      target: { entity_id: "{{ plus_switch_b }}" }
+                    - delay: "00:00:01"
+              - choose:
+                  - conditions:
+                      - condition: template
+                        value_template: "{{ tmo > 0 }}"
+                    sequence:
+                      - service: timer.start
+                        target: { entity_id: timer.humidity_m3_monitor_timeout }
+                        data:
+                          duration: >-
+                            {{ '%02d:%02d:%02d' | format(tmo//3600, (tmo%3600)//60, tmo%60) }}
+              - wait_for_trigger:
+                  - platform: template
+                    value_template: >-
+                      {% set es = expand('group.humidity_sensors') %}
+                      {% for e in es %}
+                        {% if (e.state|float(0)) < drop_thr %}
+                          {{ true }}
+                        {% endif %}
+                      {% endfor %}
+                      {{ false }}
+                timeout: "{{ tmo }}"
+                continue_on_timeout: true
+              - service: timer.cancel
+                target: { entity_id: timer.humidity_m3_monitor_timeout }
+              - repeat:
+                  count: "{{ steps }}"
+                  sequence:
+                    - service: switch.turn_on
+                      target: { entity_id: "{{ minus_switch_b }}" }
+                    - delay: "00:00:01"
+
+      - service: input_boolean.turn_off
+        target: { entity_id: input_boolean.humidity_action_running }
+      - service: input_datetime.set_datetime
+        target: { entity_id: input_datetime.humidity_last_completed }
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+      - service: system_log.write
+        data:
+          level: warning
+          message: "HUMIDITY: cycle complete; re-arm ready"

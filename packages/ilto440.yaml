@@ -1,8 +1,8 @@
 ############################################
 #        HOME ASSISTANT PACKAGE: ILTO440   #
 #  Ventilation automation (UI-only mode)   #
-#  Version: 1.0                            #
-#  Date: 2025-10-11                        #
+#  Version: 1.1                            #
+#  Date: 2025-10-17                        #
 #  Author: Mikko Jylhä                     #
 #                                          #
 #  - Hardware handles boost & speed steps  #
@@ -10,10 +10,8 @@
 #  - The main state machine to imitate     #
 #    IltoControl panel states (with some   #
 #    simplifications)                      #
-#  - The actual entitynames for 3 relays.  #
-#    needed are configured in secrets.yaml #
-#    just for convenience.                 #
-#                                          #
+#  - The actual entitynames for 3 relays   #
+#    are configured in secrets.yaml.       #
 ############################################
 
 ############################################
@@ -45,6 +43,15 @@ input_number:
     mode: slider
     icon: mdi:timer-outline
     initial: 1
+
+  # NEW: track number of boost presses (1..3). 4th press cancels.
+  boost_press_count:
+    name: Boost Press Count
+    min: 0
+    max: 3
+    step: 1
+    mode: box
+    icon: mdi:counter
 
 input_boolean:
   ventilation_system_active:
@@ -147,6 +154,8 @@ script:
         data:
           level: "{{ target }}"
 
+  # ------------------ BOOST ------------------
+
   ventilation_boost_activate:
     alias: "Ventilation: Boost Activate (first press)"
     mode: single
@@ -163,9 +172,16 @@ script:
       - service: input_boolean.turn_on
         target:
           entity_id: input_boolean.boost_active
+      # Keep legacy flag OFF for clarity (no longer drives logic)
       - service: input_boolean.turn_off
         target:
           entity_id: input_boolean.boost_extended
+      # NEW: first press = count 1
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.boost_press_count
+        data:
+          value: 1
       - service: input_datetime.set_datetime
         target:
           entity_id: input_datetime.boost_end_time
@@ -190,37 +206,58 @@ script:
       - service: system_log.write
         data:
           level: info
-          message: "Boost started (30m). UI level {{ pre }} -> {{ boosted }}."
+          message: "Boost started (30m). UI level {{ pre }} -> {{ boosted }} (press_count=1)."
 
-  ventilation_boost_extend:
-    alias: "Ventilation: Boost Extend to 60m (second press)"
+  # NEW: extend by +30m relative to remaining time (2nd & 3rd presses)
+  ventilation_boost_extend_30:
+    alias: "Ventilation: Boost Extend by 30m"
     mode: single
     sequence:
-      - service: input_boolean.turn_on
-        target:
-          entity_id: input_boolean.boost_extended
+      - variables:
+          end_s: "{{ states('input_datetime.boost_end_time') }}"
+          end_ts: >-
+            {% if end_s not in ['unknown','unavailable',''] %}
+              {{ as_timestamp(strptime(end_s, '%Y-%m-%d %H:%M:%S')) }}
+            {% else %}
+              {{ now().timestamp() }}
+            {% endif %}
+          base_ts: "{{ [end_ts, now().timestamp()] | max }}"
+          new_end_ts: "{{ base_ts + 30*60 }}"
+          new_end: "{{ as_datetime(new_end_ts).strftime('%Y-%m-%d %H:%M:%S') }}"
+          new_dur_sec: "{{ (new_end_ts - now().timestamp()) | round(0) | int }}"
+          h: "{{ (new_dur_sec // 3600) | int }}"
+          m: "{{ ((new_dur_sec % 3600) // 60) | int }}"
+          s: "{{ (new_dur_sec % 60) | int }}"
+          duration_str: "{{ '%02d:%02d:%02d' | format(h, m, s) }}"
+          curr_count: "{{ states('input_number.boost_press_count') | int }}"
+          next_count: "{{ [curr_count + 1, 3] | min }}"
       - service: input_datetime.set_datetime
         target:
           entity_id: input_datetime.boost_end_time
         data:
-          datetime: "{{ (now() + timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S') }}"
+          datetime: "{{ new_end }}"
       - service: input_datetime.set_datetime
         target:
           entity_id: input_datetime.boost_last_press
         data:
           datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.boost_press_count
+        data:
+          value: "{{ next_count }}"
       - service: timer.start
         target:
           entity_id: timer.boost_timer
         data:
-          duration: "01:00:00"
+          duration: "{{ duration_str }}"
       - service: system_log.write
         data:
           level: info
-          message: "Boost extended to 60 minutes (UI only)."
+          message: "Boost extended by +30m (press_count={{ next_count }}); new end={{ new_end }}."
 
   ventilation_boost_cancel:
-    alias: "Ventilation: Boost Cancel (third press)"
+    alias: "Ventilation: Boost Cancel (fourth press)"
     mode: single
     sequence:
       - service: timer.cancel
@@ -256,10 +293,16 @@ script:
           entity_id: input_number.ilmanvaihto_taso
         data:
           value: "{{ pre }}"
+      # NEW: reset press counter
+      - service: input_number.set_value
+        target:
+          entity_id: input_number.boost_press_count
+        data:
+          value: 0
       - service: system_log.write
         data:
           level: info
-          message: "Boost finished/canceled → UI back to level {{ pre }} (last_press reset)."
+          message: "Boost finished/canceled → UI back to level {{ pre }} (press_count=0)."
 
   ventilation_sync_level_via_relays:
     alias: "Ventilation: Sync Level via Relays (to target, via 0)"
@@ -279,16 +322,13 @@ script:
                 state: "on"
             sequence:
               - variables:
-                  # Determine target level (clamped 0..5)
                   tgt: >
                     {% set raw = (target_level if target_level is defined else states('input_number.ilmanvaihto_taso')) | int(0) %}
                     {% if   raw < 0 %} 0
                     {% elif raw > 5 %} 5
                     {% else %} {{ raw }}
                     {% endif %}
-                  # Use your configured inter-press delay
                   dly: "{{ states('input_number.delay_seconds') | int(1) }}"
-              # 1) Force OFF: press MINUS 6× with delay → ensures hardware at 0
               - repeat:
                   count: 6
                   sequence:
@@ -297,13 +337,11 @@ script:
                         entity_id: !secret minus_switch
                     - delay:
                         seconds: "{{ dly }}"
-              # (Optional) reflect UI as 0 immediately
               - service: input_number.set_value
                 target:
                   entity_id: input_number.ilmanvaihto_taso
                 data:
                   value: 0
-              # 2) Climb to target: press PLUS tgt× with delay
               - repeat:
                   count: "{{ tgt }}"
                   sequence:
@@ -406,6 +444,7 @@ automation:
         data:
           delta: -1
 
+  # >>> SIMPLIFIED BOOST HANDLER (requested logic) <<<
   - id: ventilation_boost_handler
     alias: "Ventilation: BOOST press handler"
     trigger:
@@ -419,26 +458,26 @@ automation:
     action:
       - variables:
           active: "{{ is_state('input_boolean.boost_active','on') }}"
-          extended: "{{ is_state('input_boolean.boost_extended','on') }}"
-          # Get the stored time (may be unknown/unavailable)
-          delta_sec: >-
-            {% set s = states('input_datetime.boost_last_press') %}
-            {% set last = 0 if s in ['unknown','unavailable',''] else as_timestamp(as_datetime(s)) %}
-            {{ (as_timestamp(now()) - last) | int }}
+          press_count: "{{ states('input_number.boost_press_count') | int }}"
       - choose:
+          # FIRST PRESS → ACTIVATE (press_count becomes 1)
           - conditions:
               - condition: template
                 value_template: "{{ not active }}"
             sequence:
               - service: script.ventilation_boost_activate
+
+          # SECOND or THIRD PRESS → EXTEND +30m (press_count 1→2 or 2→3)
           - conditions:
               - condition: template
-                value_template: "{{ active and (not extended) and (delta_sec <= 10) }}"
+                value_template: "{{ active and press_count < 3 }}"
             sequence:
-              - service: script.ventilation_boost_extend
+              - service: script.ventilation_boost_extend_30
+
+          # FOURTH PRESS → CANCEL (press_count was 3)
           - conditions:
               - condition: template
-                value_template: "{{ active and extended }}"
+                value_template: "{{ active and press_count >= 3 }}"
             sequence:
               - service: script.ventilation_boost_cancel
         default:
